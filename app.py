@@ -1,7 +1,9 @@
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, session, jsonify
 import requests
 from pathlib import Path
 from typing import List, Dict
+from datetime import datetime
+import json
 
 app = Flask(__name__)
 
@@ -34,7 +36,13 @@ def search_recipes(ingredients: List[str], avoid: List[str], diet: List[str], in
     res.raise_for_status()
     data = res.json()
     
-    return data.get('results', [])
+    # Filter out recipes with avoided ingredients
+    filtered_results = []
+    for recipe in data.get('results', []):
+        if not any(ingredient.lower() in recipe['title'].lower() for ingredient in avoid):
+            filtered_results.append(recipe)
+    
+    return filtered_results
 
 def get_recipe_details(recipe_id: int, api_key: str) -> Dict:
     url = f"https://api.spoonacular.com/recipes/{recipe_id}/information"
@@ -53,6 +61,7 @@ def get_recipe_summary(recipe_id: int, api_key: str) -> str:
 # Load API key
 env_path = Path(__file__).parent / 'recipehunter.env'
 API_KEY = load_api_key(env_path)
+#app.secret_key = load_api_key(env_path)
 
 # Predefined lists
 POPULAR_INGREDIENTS = [
@@ -181,8 +190,16 @@ HTML_TEMPLATE = '''
             font-style: italic;
             margin-top: 5px;
         }
+        #search-name {
+            width: 100%;
+            padding: 5px;
+            margin-bottom: 10px;
+        }
+        #save-search {
+            margin-top: 10px;
+        }
     </style>
-    <script>
+   <script>
         $(document).ready(function() {
             $('.select2-multi').select2({
                 tags: true,
@@ -214,6 +231,48 @@ HTML_TEMPLATE = '''
             $('#mode-toggle').change(function() {
                 setMode(this.checked ? 'dark' : 'light');
             });
+
+            // Clear All button
+            $('#clear-all').click(function() {
+                $('.select2-multi, .select2-dropdown').val(null).trigger('change');
+                $('#search-name').val('');
+                // Clear session data
+                $.post('/clear_session');
+            });
+
+             // Save Search button
+            $('#save-search').click(function() {
+                var searchData = {
+                    name: $('#search-name').val() || 'Unnamed Search',
+                    ingredients: $('#ingredients').val(),
+                    avoid: $('#avoid').val(),
+                    diet: $('#diet').val(),
+                    intolerances: $('#intolerances').val(),
+                    recipes: []  // This will be populated with recipe data
+                };
+
+                // Collect recipe data
+                $('.recipe-item').each(function() {
+                    searchData.recipes.push({
+                        title: $(this).find('.recipe-title').text(),
+                        summary: $(this).find('.recipe-summary').text(),
+                        id: $(this).data('recipe-id')
+                    });
+                });
+
+                $.ajax({
+                    url: '/save_search',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify(searchData),
+                    success: function(response) {
+                        alert('Search saved successfully!');
+                    },
+                    error: function(error) {
+                        alert('Error saving search: ' + error.responseText);
+                    }
+                });
+            });
         });
     </script>
 </head>
@@ -222,31 +281,35 @@ HTML_TEMPLATE = '''
         <div class="search-section">
             <h1>Recipe Hunter</h1>
             <form method="post">
+                <label for="search-name">Search Name:</label><br>
+                <input type="text" id="search-name" name="search_name" value="{{ session.get('search_name', '') }}" placeholder="Enter a name for your search"><br>
                 <label for="ingredients">Ingredients:</label><br>
                 <select class="select2-multi" id="ingredients" name="ingredients" multiple="multiple" style="width: 100%;">
                     {% for ingredient in popular_ingredients %}
-                        <option value="{{ ingredient }}">{{ ingredient }}</option>
+                        <option value="{{ ingredient }}" {% if ingredient in session.get('ingredients', []) %}selected{% endif %}>{{ ingredient }}</option>
                     {% endfor %}
                 </select><br>
                 <label for="avoid">Ingredients to avoid:</label><br>
                 <select class="select2-multi" id="avoid" name="avoid" multiple="multiple" style="width: 100%;">
                     {% for ingredient in popular_ingredients %}
-                        <option value="{{ ingredient }}">{{ ingredient }}</option>
+                        <option value="{{ ingredient }}" {% if ingredient in session.get('avoid', []) %}selected{% endif %}>{{ ingredient }}</option>
                     {% endfor %}
                 </select><br>
                 <label for="diet">Diet:</label><br>
                 <select class="select2-dropdown" id="diet" name="diet" multiple="multiple" style="width: 100%;">
                     {% for diet in diet_options %}
-                        <option value="{{ diet }}">{{ diet }}</option>
+                        <option value="{{ diet }}" {% if diet in session.get('diet', []) %}selected{% endif %}>{{ diet }}</option>
                     {% endfor %}
                 </select><br>
                 <label for="intolerances">Intolerances:</label><br>
                 <select class="select2-dropdown" id="intolerances" name="intolerances" multiple="multiple" style="width: 100%;">
                     {% for intolerance in intolerance_options %}
-                        <option value="{{ intolerance }}">{{ intolerance }}</option>
+                        <option value="{{ intolerance }}" {% if intolerance in session.get('intolerances', []) %}selected{% endif %}>{{ intolerance }}</option>
                     {% endfor %}
                 </select><br>
                 <input type="submit" value="Search Recipes">
+                <button type="button" id="clear-all">Clear All</button>
+                <button type="button" id="save-search">Save Search</button>
             </form>
         </div>
         <div class="results-section">
@@ -278,13 +341,49 @@ HTML_TEMPLATE = '''
 </html>
 '''
 
+@app.route('/save_search', methods=['POST'])
+def save_search():
+    search_data = request.json
+    search_name = search_data.get('name') or f"New Search {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    if 'saved_searches' not in session:
+        session['saved_searches'] = {}
+    
+    session['saved_searches'][search_name] = {
+        'ingredients': search_data.get('ingredients', []),
+        'avoid': search_data.get('avoid', []),
+        'diet': search_data.get('diet', []),
+        'intolerances': search_data.get('intolerances', []),
+        'recipes': search_data.get('recipes', [])
+    }
+    session.modified = True
+    
+    return jsonify({'message': 'Search saved successfully'}), 200
+
+@app.route('/get_saved_searches', methods=['GET'])
+def get_saved_searches():
+    return jsonify(session.get('saved_searches', {}))
+
 @app.route('/', methods=['GET', 'POST'])
 def home():
     if request.method == 'POST':
+        search_name = request.form.get('search_name') or f"New Search {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        if not search_name:
+            search_name = f"new search {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        app.secret_key = search_name  # Set the secret key dynamically
+        
         ingredients = request.form.getlist('ingredients')
         avoid = request.form.getlist('avoid')
         diet = request.form.getlist('diet')
         intolerances = request.form.getlist('intolerances')
+        
+        # Store the form data in the session
+        session['search_name'] = search_name
+        session['ingredients'] = ingredients
+        session['avoid'] = avoid
+        session['diet'] = diet
+        session['intolerances'] = intolerances
         
         try:
             recipes = search_recipes(ingredients, avoid, diet, intolerances, API_KEY)
@@ -300,12 +399,21 @@ def home():
                                           popular_ingredients=POPULAR_INGREDIENTS,
                                           diet_options=DIET_OPTIONS,
                                           intolerance_options=INTOLERANCE_OPTIONS)
-    
+
+    # Set a default secret key for GET requests
+    app.secret_key = f"new search {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
     return render_template_string(HTML_TEMPLATE, 
                                   recipes=None,
                                   popular_ingredients=POPULAR_INGREDIENTS,
                                   diet_options=DIET_OPTIONS,
                                   intolerance_options=INTOLERANCE_OPTIONS)
+
+@app.route('/clear_session', methods=['POST'])
+def clear_session():
+    session.clear()
+    return '', 204
+
 
 @app.route('/recipe/<int:recipe_id>')
 def recipe_details(recipe_id):
@@ -434,6 +542,33 @@ def recipe_details(recipe_id):
         return recipe_html
     except Exception as e:
         return f"An error occurred: {str(e)}"
+
+# Load API key
+env_path = Path(__file__).parent / 'recipehunter.env'
+try:
+    app.config['API_KEY'] = load_api_key(env_path)
+except Exception as e:
+    print(f"Error loading API key: {e}")
+    exit(1)
+
+# Define constants
+POPULAR_INGREDIENTS = [
+    "Chicken", "Beef", "Pork", "Pasta", "Rice", "Potatoes", "Onions", "Garlic",
+    "Tomatoes", "Cheese", "Eggs", "Milk", "Bread", "Butter", "Olive Oil",
+    "Salt", "Pepper", "Sugar", "Flour", "Carrots", "Celery", "Bell Peppers",
+    "Broccoli", "Spinach", "Lettuce", "Corn", "Beans", "Mushrooms", "Lemon", "Lime"
+]
+
+DIET_OPTIONS = [
+    "Gluten Free", "Ketogenic", "Vegetarian", "Lacto-Vegetarian", "Ovo-Vegetarian",
+    "Pescetarian", "Paleo", "Primal", "Low FODMAP", "Whole30"
+]
+
+INTOLERANCE_OPTIONS = [
+    "Dairy", "Egg", "Gluten", "Grain", "Peanut", "Seafood", "Sesame", "Shellfish",
+    "Soy", "Sulfite", "Tree Nut", "Wheat"
+]
+
 
 if __name__ == '__main__':
     app.run(debug=True)
