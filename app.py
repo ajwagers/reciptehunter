@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List, Dict
 from datetime import datetime
 import json
+import os
 
 app = Flask(__name__)
 
@@ -57,6 +58,18 @@ def get_recipe_summary(recipe_id: int, api_key: str) -> str:
     res = requests.get(url, params=params)
     res.raise_for_status()
     return res.json()['summary']
+
+def load_saved_searches():
+    saved_searches_path = Path(__file__).parent / 'saved_searches.json'
+    if saved_searches_path.exists():
+        with open(saved_searches_path, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_searches(searches):
+    saved_searches_path = Path(__file__).parent / 'saved_searches.json'
+    with open(saved_searches_path, 'w') as f:
+        json.dump(searches, f)
 
 # Load API key
 env_path = Path(__file__).parent / 'recipehunter.env'
@@ -198,6 +211,14 @@ HTML_TEMPLATE = '''
         #save-search {
             margin-top: 10px;
         }
+        #saved-searches-list {
+            display: none;
+            margin-top: 10px;
+        }
+        #saved-searches-list select {
+            width: 100%;
+            margin-bottom: 10px;
+        }
     </style>
    <script>
         $(document).ready(function() {
@@ -236,8 +257,12 @@ HTML_TEMPLATE = '''
             $('#clear-all').click(function() {
                 $('.select2-multi, .select2-dropdown').val(null).trigger('change');
                 $('#search-name').val('');
+                // Clear results section
+                $('.results-section').html('');
                 // Clear session data
                 $.post('/clear_session');
+                // Hide saved searches list if it's visible
+                $('#saved-searches-list').hide();
             });
 
              // Save Search button
@@ -271,6 +296,31 @@ HTML_TEMPLATE = '''
                     error: function(error) {
                         alert('Error saving search: ' + error.responseText);
                     }
+                });
+            });
+            // Load Saved Searches button
+            $('#load-saved-searches').click(function() {
+                $.get('/get_saved_searches', function(data) {
+                    var selectHtml = '<select id="saved-search-select">';
+                    for (var key in data) {
+                        selectHtml += '<option value="' + key + '">' + key + '</option>';
+                    }
+                    selectHtml += '</select>';
+                    $('#saved-searches-list').html(selectHtml + '<button id="load-selected-search">Load Selected Search</button>');
+                    $('#saved-searches-list').show();
+                });
+            });
+
+            // Load Selected Search button
+            $(document).on('click', '#load-selected-search', function() {
+                var selectedSearch = $('#saved-search-select').val();
+                $.get('/load_saved_search/' + encodeURIComponent(selectedSearch), function(data) {
+                    $('#search-name').val(selectedSearch);
+                    $('#ingredients').val(data.ingredients).trigger('change');
+                    $('#avoid').val(data.avoid).trigger('change');
+                    $('#diet').val(data.diet).trigger('change');
+                    $('#intolerances').val(data.intolerances).trigger('change');
+                    alert('Search loaded successfully!');
                 });
             });
         });
@@ -310,7 +360,9 @@ HTML_TEMPLATE = '''
                 <input type="submit" value="Search Recipes">
                 <button type="button" id="clear-all">Clear All</button>
                 <button type="button" id="save-search">Save Search</button>
+                <button type="button" id="load-saved-searches">Load Saved Searches</button>
             </form>
+            <div id="saved-searches-list"></div>
         </div>
         <div class="results-section">
             {% if recipes is not none %}
@@ -318,8 +370,8 @@ HTML_TEMPLATE = '''
                     <h2>Recipes:</h2>
                     <ul>
                     {% for recipe in recipes %}
-                        <li>
-                            <a href="{{ url_for('recipe_details', recipe_id=recipe.id) }}">{{ recipe.title }}</a>
+                        <li class="recipe-item" data-recipe-id="{{ recipe.id }}">
+                            <a href="{{ url_for('recipe_details', recipe_id=recipe.id) }}" class="recipe-title">{{ recipe.title }}</a>
                             <p class="recipe-summary">{{ recipe.summary[:120] }}...</p>
                         </li>
                     {% endfor %}
@@ -346,23 +398,37 @@ def save_search():
     search_data = request.json
     search_name = search_data.get('name') or f"New Search {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     
-    if 'saved_searches' not in session:
-        session['saved_searches'] = {}
-    
-    session['saved_searches'][search_name] = {
+    saved_searches = load_saved_searches()
+    saved_searches[search_name] = {
         'ingredients': search_data.get('ingredients', []),
         'avoid': search_data.get('avoid', []),
         'diet': search_data.get('diet', []),
         'intolerances': search_data.get('intolerances', []),
         'recipes': search_data.get('recipes', [])
     }
-    session.modified = True
+    save_searches(saved_searches)
     
     return jsonify({'message': 'Search saved successfully'}), 200
 
 @app.route('/get_saved_searches', methods=['GET'])
 def get_saved_searches():
-    return jsonify(session.get('saved_searches', {}))
+    return jsonify(load_saved_searches())
+
+@app.route('/load_saved_search/<search_name>')
+def load_saved_search(search_name):
+    saved_searches = load_saved_searches()
+    if search_name in saved_searches:
+        return jsonify(saved_searches[search_name])
+    else:
+        return jsonify({'error': 'Search not found'}), 404
+
+@app.route('/clear_session', methods=['POST'])
+def clear_session():
+    # Clear everything from the session except saved searches
+    for key in list(session.keys()):
+        if key != 'saved_searches':
+            session.pop(key)
+    return '', 204
 
 @app.route('/', methods=['GET', 'POST'])
 def home():
@@ -408,11 +474,6 @@ def home():
                                   popular_ingredients=POPULAR_INGREDIENTS,
                                   diet_options=DIET_OPTIONS,
                                   intolerance_options=INTOLERANCE_OPTIONS)
-
-@app.route('/clear_session', methods=['POST'])
-def clear_session():
-    session.clear()
-    return '', 204
 
 
 @app.route('/recipe/<int:recipe_id>')
@@ -571,4 +632,5 @@ INTOLERANCE_OPTIONS = [
 
 
 if __name__ == '__main__':
+    app.secret_key = os.urandom(24)
     app.run(debug=True)
